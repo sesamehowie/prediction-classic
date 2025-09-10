@@ -10,12 +10,10 @@ import "@pythnetwork/pyth-sdk-solidity/PythStructs.sol";
 contract PredictionClassic is Ownable, ReentrancyGuard, Pausable {
     IPyth public pythContract;
     bytes32 private constant priceId =
-        0xff61491a931112ddf1bd8147cd1b641375f79f5825126d665480874634fd0ace;
+        0xe62df6c8b4a85fe1a67db44dc12de5db330f7ac66b72dc658afedf0f4a415b43;
     address public constant pyth = 0x2880aB155794e7179c9eE2e38200202908C17B43;
     address public operator;
     uint256 public roundStageDuration = 600;
-    uint256 public constant PAYOUT_MULTIPLIER = 19;
-    uint256 public constant PAYOUT_DIVISOR = 10;
     uint256 public constant MAX_BUFFER_SECONDS = 300;
     uint256 public minBetAmount = 0.1 ether;
     uint256 public maxBetAmount = 10 ether;
@@ -543,7 +541,7 @@ contract PredictionClassic is Ownable, ReentrancyGuard, Pausable {
         Position position
     ) public view returns (uint256) {
         require(position != Position.None, "Can only calculate pump or dump");
-        require(betAmount <= maxBet, "Cannot place this bet");
+        require(betAmount <= maxBetAmount, "Cannot place this bet");
         require(
             currentRoundId >= roundId - 1,
             "Can only calculate potential rewards for live rounds"
