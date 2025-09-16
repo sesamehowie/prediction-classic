@@ -129,8 +129,13 @@ contract PredictionClassic is Ownable, ReentrancyGuard, Pausable {
         uint256 indexed roundId,
         uint256 amount
     );
+    event GameResetAt(
+        uint256 indexed roundId,
+        uint256 resetPrice,
+        uint256 timestamp
+    );
 
-    constructor(address _operator) Ownable(msg.sender) {
+    constructor(address _operator) {
         operator = _operator;
         pythContract = IPyth(pyth);
     }
@@ -258,11 +263,24 @@ contract PredictionClassic is Ownable, ReentrancyGuard, Pausable {
         round.roundId = roundId;
         round.startTimestamp = block.timestamp;
 
-        uint256 prevCloseTimestamp = roundId > 1
-            ? rounds[roundId - 1].closeTimestamp
-            : block.timestamp;
-        round.lockTimestamp = prevCloseTimestamp;
-        round.closeTimestamp = prevCloseTimestamp + roundStageDuration;
+        uint256 lockTime;
+        if (roundId > 1) {
+            uint256 prevCloseTimestamp = rounds[roundId - 1].closeTimestamp;
+
+            if (
+                prevCloseTimestamp > block.timestamp ||
+                (prevCloseTimestamp + MAX_BUFFER_SECONDS >= block.timestamp)
+            ) {
+                lockTime = prevCloseTimestamp;
+            } else {
+                lockTime = block.timestamp + roundStageDuration;
+            }
+        } else {
+            lockTime = block.timestamp + roundStageDuration;
+        }
+
+        round.lockTimestamp = lockTime;
+        round.closeTimestamp = lockTime + roundStageDuration;
 
         emit StartRound(roundId);
     }
@@ -363,55 +381,44 @@ contract PredictionClassic is Ownable, ReentrancyGuard, Pausable {
     }
 
     function cancelRound(
-        uint256 roundId,
         bytes[] calldata pythPriceUpdate
     ) public payable onlyOwnerOrOperator nonReentrant {
-        require(
-            roundId == currentRoundId || roundId == currentRoundId - 1,
-            "Can only cancel current or previous round"
-        );
         uint256 price = updateAndGetPrice(pythPriceUpdate);
         currentPrice = price;
 
-        _cancelRoundInternal(roundId, price);
+        _cancelRoundInternal(price);
     }
 
-    function _cancelRoundInternal(uint256 roundId, uint256 price) internal {
-        Round storage round = rounds[roundId];
-
-        require(
-            !round.rewardsCalculated && !round.roundCancelled,
-            "Round finished"
-        );
-        require(
-            block.timestamp > round.closeTimestamp + MAX_BUFFER_SECONDS,
-            "Buffer time not passed"
-        );
-
-        round.roundCancelled = true;
-
-        emit RoundCancelled(roundId, "Timeout");
-
-        _refundPlayersInRound(roundId);
-
-        if (roundId == currentRoundId) {
-            _resetGameState(price);
-        } else if (roundId == currentRoundId - 1) {
-            round.closeTimestamp = block.timestamp;
-            round.rewardsCalculated = true;
-
-            Round storage currentRound = rounds[currentRoundId];
+    function _cancelRoundInternal(uint256 price) internal {
+        if (currentRoundId > 1) {
+            Round storage prevRound = rounds[currentRoundId - 1];
             if (
-                currentRound.startTimestamp != 0 && !currentRound.oracleCalled
+                prevRound.startTimestamp != 0 &&
+                !prevRound.rewardsCalculated &&
+                !prevRound.roundCancelled
             ) {
-                currentRound.startTimestamp = block.timestamp;
-                currentRound.lockTimestamp = block.timestamp;
-                currentRound.closeTimestamp =
-                    block.timestamp +
-                    roundStageDuration;
-                emit StartRound(currentRoundId);
+                prevRound.roundCancelled = true;
+                prevRound.closeTimestamp = block.timestamp;
+                prevRound.rewardsCalculated = true;
+                emit RoundCancelled(currentRoundId - 1, "Manual cancellation");
+                _refundPlayersInRound(currentRoundId - 1);
             }
         }
+
+        Round storage currentRound = rounds[currentRoundId];
+        if (
+            currentRound.startTimestamp != 0 &&
+            !currentRound.rewardsCalculated &&
+            !currentRound.roundCancelled
+        ) {
+            currentRound.roundCancelled = true;
+            currentRound.closeTimestamp = block.timestamp;
+            currentRound.rewardsCalculated = true;
+            emit RoundCancelled(currentRoundId, "Manual cancellation");
+            _refundPlayersInRound(currentRoundId);
+        }
+        emit GameResetAt(currentRoundId, price, block.timestamp);
+        _generateRounds(price);
     }
 
     function _resetGameState(uint256 price) internal {
@@ -427,10 +434,40 @@ contract PredictionClassic is Ownable, ReentrancyGuard, Pausable {
         Round storage newRound = rounds[currentRoundId];
         newRound.roundId = currentRoundId;
         newRound.startTimestamp = block.timestamp;
-        newRound.lockTimestamp = block.timestamp + roundStageDuration;
+        newRound.lockPrice = price;
         newRound.closeTimestamp = block.timestamp + (roundStageDuration * 2);
+        newRound.lockTimestamp = block.timestamp + roundStageDuration;
 
         emit StartRound(currentRoundId);
+    }
+
+    function _generateRounds(uint256 price) internal {
+        currentRoundId = currentRoundId + 1;
+
+        if (genesisStarted == 0) {
+            genesisStarted = 1;
+        }
+        if (genesisLocked == 0) {
+            genesisLocked = 1;
+        }
+
+        uint256 liveRoundId = currentRoundId;
+        Round storage liveRound = rounds[liveRoundId];
+        liveRound.roundId = liveRoundId;
+        liveRound.startTimestamp = block.timestamp - roundStageDuration;
+        liveRound.lockTimestamp = block.timestamp;
+        liveRound.closeTimestamp = block.timestamp + roundStageDuration;
+        liveRound.lockPrice = price;
+        liveRound.oracleCalled = true;
+
+        currentRoundId = currentRoundId + 1;
+        Round storage upcomingRound = rounds[currentRoundId];
+        upcomingRound.roundId = currentRoundId;
+        upcomingRound.startTimestamp = block.timestamp;
+        upcomingRound.lockTimestamp = block.timestamp + roundStageDuration;
+        upcomingRound.closeTimestamp =
+            block.timestamp +
+            (roundStageDuration * 2);
     }
 
     function _refundPlayersInRound(uint256 roundId) internal {
